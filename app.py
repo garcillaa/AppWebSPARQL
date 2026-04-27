@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Mountain Globe Explorer — Flask edition
-SPARQL + Wikidata + Three.js
-Run locally : python app.py  →  http://localhost:5000
-Deploy      : gunicorn app:app
+link: http://localhost:5000
+Deploy: gunicorn app:app
 """
 
 import json
@@ -22,14 +20,18 @@ CACHE_DIR       = os.path.join(os.path.dirname(__file__), ".cache")
 SPARQL_ENDPOINT = "https://query.wikidata.org/sparql"
 
 
-# ─── DISK CACHE ───────────────────────────────────────────────────────────────
-CACHE_TTL = 24 * 3600  # seconds — re-query Wikidata after 24 h
+# ─── MANEJO DE CACHÉ ───────────────────────────────────────────────────────────────
+CACHE_TTL = 24 * 3600  # tiempo que tarda hasta volver a mirar Wikidata por si se ha actualizado
 
 def _cache_path(lo: int, hi: int) -> str:
+    """Devuelve la ruta al fichero JSON de caché para el rango [lo, hi).
+    Crea el directorio .cache/ si no existe."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     return os.path.join(CACHE_DIR, f"{lo}_{hi}.json")
 
 def _cache_load(lo: int, hi: int):
+    """Carga el resultado cacheado para el rango [lo, hi) si existe y no ha expirado.
+    Devuelve la lista de montañas o None si no hay caché válida."""
     path = _cache_path(lo, hi)
     if not os.path.exists(path):
         return None
@@ -39,12 +41,16 @@ def _cache_load(lo: int, hi: int):
         return json.load(f)
 
 def _cache_save(lo: int, hi: int, data: list):
+    """Persiste en disco la lista de montañas para el rango [lo, hi)."""
     with open(_cache_path(lo, hi), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
 
 
-# ─── SPARQL QUERY ─────────────────────────────────────────────────────────────
+# ─── PETICIÓN A WIKIDATA ─────────────────────────────────────────────────────────────
 def build_sparql(lo: int, hi: int) -> str:
+    """Construye la consulta SPARQL para obtener montañas de la Tierra
+    cuya altitud normalizada en metros esté en el rango [lo, hi).
+    Usa una subconsulta para limitar resultados antes de resolver etiquetas."""
     return f"""
 SELECT ?mountain ?mountainLabel ?height ?lat ?lon ?country ?countryLabel WHERE {{
   {{
@@ -69,6 +75,10 @@ ORDER BY DESC(?height)
 """
 
 def query_wikidata(lo: int, hi: int):
+    """Devuelve la lista de montañas para el rango [lo, hi) en metros.
+    Comprueba primero la caché en disco; si no hay resultado válido lanza
+    la consulta SPARQL contra Wikidata, deduplica por coordenadas y guarda
+    el resultado en caché antes de devolverlo."""
     cached = _cache_load(lo, hi)
     if cached is not None:
         print(f"  ✓ Cache hit: {lo}–{hi} m ({len(cached)} mountains)")
@@ -87,7 +97,7 @@ def query_wikidata(lo: int, hi: int):
     with urllib.request.urlopen(req, timeout=45) as resp:
         raw = json.loads(resp.read().decode())
 
-    # First pass: collect all rows
+    # Recoge todas las filas
     rows = []
     for b in raw.get("results", {}).get("bindings", []):
         try:
@@ -103,9 +113,10 @@ def query_wikidata(lo: int, hi: int):
         except (KeyError, ValueError):
             continue
 
-    # Deduplicate by geographic position (same coords = same mountain).
-    # Multiple statements per mountain collapse into one entry:
-    # keep the highest height, merge country names.
+    # Genera solo una montaña si hay varias iguales, pues al realizar la petición obtenemos varias instancias
+    # de la misma montaña.
+    # De la misma manera si hay más de una montaña con las mismas coords nos quedamos con una
+    # Guardamos la altura más grande de cada una y el nombre del país en el que está
     seen = {}
     for r in rows:
         key = (round(r["lat"], 3), round(r["lon"], 3))
@@ -127,14 +138,17 @@ def query_wikidata(lo: int, hi: int):
     return results
 
 
-# ─── BACKGROUND PREFETCH ──────────────────────────────────────────────────────
-# Priority ranges to warm up: high-altitude bands most likely to be clicked first.
+# ─── ALMACENAMIENTO DE RANGOS MÁS USADOS ──────────────────────────────────────────────────────
+# Los rangos que se prevee que van a ser más usados se guardan en una lista para precargarlos
 PREFETCH_RANGES = [
     (7000, 8000), (8000, 9000), (6000, 7000),
     (5000, 6000), (4000, 5000), (3000, 4000),
 ]
 
 def _prefetch():
+    """Precarga en segundo plano los rangos de altitud más frecuentes.
+    Se ejecuta en un hilo daemon al arrancar el servidor para que las
+    primeras peticiones del usuario encuentren los datos ya en caché."""
     print("  Background prefetch started…")
     for lo, hi in PREFETCH_RANGES:
         if _cache_load(lo, hi) is not None:
@@ -143,23 +157,28 @@ def _prefetch():
         try:
             print(f"  Prefetching {lo}–{hi} m…")
             query_wikidata(lo, hi)
-            time.sleep(2)   # respect Wikidata rate limits between requests
+            time.sleep(2)   # para respetas los limites de tiempo en Wikidata entre peticiones
         except Exception as e:
             print(f"  ✗ Prefetch failed {lo}–{hi}: {e}")
     print("  Background prefetch complete.")
 
-# Start at module load so gunicorn workers also trigger it
+# gunicurn funciona a la vez que lo triggerea
 threading.Thread(target=_prefetch, daemon=True).start()
 
 
 # ─── FLASK ROUTES ─────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
+    """Sirve la página principal de la aplicación."""
     return render_template("index.html")
 
-
+# proxy entre wikidata y el navegador
 @app.route("/sparql")
 def sparql_proxy():
+    """Proxy HTTP entre el navegador y Wikidata.
+    Recibe los parámetros lo y hi, valida el rango, llama a query_wikidata
+    y devuelve el resultado como JSON. Evita que el navegador tenga que
+    contactar directamente con Wikidata (problemas de CORS)."""
     try:
         lo = int(request.args["lo"])
         hi = int(request.args["hi"])
@@ -179,7 +198,7 @@ def sparql_proxy():
         return jsonify({"error": str(e)}), 502
 
 
-# ─── MAIN (local dev only — gunicorn ignores this block) ──────────────────────
+# ─── MAIN ──────────────────────
 if __name__ == "__main__":
     print("=" * 55)
     print("  ⛰  Mountain Globe Explorer")

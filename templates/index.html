@@ -354,14 +354,14 @@
 
 <div class="main">
   <aside class="sidebar">
-    <div class="sidebar-header">Altitude ranges (m)</div>
+    <div class="sidebar-header">Rangos de altitud (m)</div>
     <div class="range-list" id="range-list"></div>
     <div class="sidebar-footer">
       <div class="status-line">
         <div class="status-dot" id="status-dot"></div>
-        <span id="status-text">Ready</span>
+        <span id="status-text">Listo</span>
       </div>
-      <div id="total-count" style="color:var(--muted)">Select a range to load mountains</div>
+      <div id="total-count" style="color:var(--muted)">Selecciona un rango de metros para ver montañas</div>
     </div>
   </aside>
 
@@ -381,14 +381,14 @@
     </div>
 
     <div class="legend" id="legend" style="display:none">
-      <div class="legend-title">Peak height</div>
-      <div class="legend-item"><div class="legend-swatch" style="background:#3b82f6"></div> Selected range</div>
-      <div class="legend-item"><div class="legend-swatch" style="background:#06b6d4"></div> Tallest in range</div>
+      <div class="legend-title">Altura de la montaña</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#3b82f6"></div> Rango escogido</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#06b6d4"></div> Más alta del rango</div>
     </div>
 
     <div class="controls-hint">
-      Drag to rotate &nbsp;·&nbsp; Scroll to zoom<br>
-      Hover peak for details &nbsp;·&nbsp; Auto-rotates when idle
+      Desliza para rotar &nbsp;·&nbsp; Rueda del ratón para zoom<br>
+      Pulsa las montañas para más info &nbsp;·&nbsp;
     </div>
   </div>
 </div>
@@ -402,9 +402,7 @@ for (let lo = 500; lo < 9000; lo += 500) {
 }
 // Add 8500–9000+ cap
 RANGES.push({ lo: 8500, hi: 9000 });
-// Broad high-altitude bands
-RANGES.push({ lo: 7000, hi: 8000 });
-RANGES.push({ lo: 8000, hi: 9000 });
+
 
 // Distinct colors per range band
 const RANGE_COLORS = [
