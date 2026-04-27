@@ -1,0 +1,944 @@
+#!/usr/bin/env python3
+"""
+Mountain Globe Explorer
+Interactive 3D globe showing world mountains by altitude range,
+queried live from Wikidata via SPARQL.
+Run: python main.py
+Then open http://localhost:8000 in your browser.
+"""
+
+import http.server
+import socketserver
+import json
+import urllib.request
+import urllib.parse
+import urllib.error
+import os
+import threading
+import time
+from http import HTTPStatus
+
+PORT = 8000
+CACHE_DIR = os.path.join(os.path.dirname(__file__), ".cache")
+
+HTML_PAGE = r"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mountain Globe Explorer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@300;400&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #090e1a;
+    --surface: #111827;
+    --surface2: #1a2336;
+    --border: rgba(255,255,255,0.08);
+    --accent: #3b82f6;
+    --accent2: #06b6d4;
+    --text: #f1f5f9;
+    --muted: #64748b;
+    --success: #10b981;
+    --warn: #f59e0b;
+    --danger: #ef4444;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  header {
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--surface);
+    flex-shrink: 0;
+    z-index: 10;
+  }
+
+  .logo {
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .subtitle {
+    font-size: 12px;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-weight: 300;
+  }
+
+  .main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* SIDEBAR */
+  .sidebar {
+    width: 300px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .sidebar-header {
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .range-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+
+  .range-list::-webkit-scrollbar { width: 4px; }
+  .range-list::-webkit-scrollbar-track { background: transparent; }
+  .range-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .range-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    font-family: 'Syne', sans-serif;
+    font-size: 13px;
+    text-align: left;
+    transition: all 0.15s ease;
+    margin-bottom: 2px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .range-btn:hover {
+    background: var(--surface2);
+    border-color: var(--border);
+  }
+
+  .range-btn.active {
+    background: var(--surface2);
+    border-color: var(--accent);
+  }
+
+  .range-btn.loading {
+    opacity: 0.7;
+    cursor: wait;
+  }
+
+  .range-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .range-label {
+    flex: 1;
+    font-weight: 700;
+  }
+
+  .range-count {
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    color: var(--muted);
+    background: var(--bg);
+    padding: 2px 7px;
+    border-radius: 10px;
+  }
+
+  .range-btn.active .range-count {
+    color: var(--accent);
+  }
+
+  .spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+    flex-shrink: 0;
+    display: none;
+  }
+
+  .range-btn.loading .spinner { display: block; }
+  .range-btn.loading .range-dot { display: none; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .sidebar-footer {
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    color: var(--muted);
+  }
+
+  .status-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--success);
+    flex-shrink: 0;
+  }
+
+  .status-dot.loading {
+    background: var(--warn);
+    animation: pulse 1s ease infinite;
+  }
+
+  .status-dot.error {
+    background: var(--danger);
+  }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  /* GLOBE AREA */
+  .globe-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+
+  #globe-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* TOOLTIP */
+  #tooltip {
+    position: absolute;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    max-width: 200px;
+    z-index: 100;
+  }
+
+  #tooltip.visible { opacity: 1; }
+
+  .tt-name {
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  .tt-height {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: var(--accent2);
+  }
+
+  .tt-country {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  /* LEGEND */
+  .legend {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+  }
+
+  .legend-title {
+    color: var(--muted);
+    margin-bottom: 8px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: var(--text);
+  }
+
+  .legend-swatch {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* CONTROLS HINT */
+  .controls-hint {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    color: var(--muted);
+    line-height: 1.8;
+  }
+
+  .empty-state {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    color: var(--muted);
+    pointer-events: none;
+  }
+
+  .empty-icon {
+    font-size: 48px;
+    margin-bottom: 12px;
+    opacity: 0.3;
+  }
+
+  .empty-text {
+    font-size: 14px;
+    font-family: 'DM Mono', monospace;
+  }
+
+  #error-msg {
+    display: none;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--surface);
+    border: 1px solid var(--danger);
+    border-radius: 10px;
+    padding: 16px 20px;
+    font-size: 13px;
+    font-family: 'DM Mono', monospace;
+    color: var(--danger);
+    text-align: center;
+    max-width: 280px;
+    z-index: 200;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <div class="logo">⛰ Mountain Globe</div>
+    <div class="subtitle">SPARQL · Wikidata · Three.js</div>
+  </div>
+</header>
+
+<div class="main">
+  <aside class="sidebar">
+    <div class="sidebar-header">Altitude ranges (m)</div>
+    <div class="range-list" id="range-list"></div>
+    <div class="sidebar-footer">
+      <div class="status-line">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="status-text">Ready</span>
+      </div>
+      <div id="total-count" style="color:var(--muted)">Select a range to load mountains</div>
+    </div>
+  </aside>
+
+  <div class="globe-wrap">
+    <canvas id="globe-canvas"></canvas>
+
+    <div class="empty-state" id="empty-state">
+      <div class="empty-icon">🌍</div>
+      <div class="empty-text">Select an altitude range<br>to explore mountains</div>
+    </div>
+
+    <div id="error-msg"></div>
+    <div id="tooltip">
+      <div class="tt-name" id="tt-name"></div>
+      <div class="tt-height" id="tt-height"></div>
+      <div class="tt-country" id="tt-country"></div>
+    </div>
+
+    <div class="legend" id="legend" style="display:none">
+      <div class="legend-title">Peak height</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#3b82f6"></div> Selected range</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#06b6d4"></div> Tallest in range</div>
+    </div>
+
+    <div class="controls-hint">
+      Drag to rotate &nbsp;·&nbsp; Scroll to zoom<br>
+      Hover peak for details &nbsp;·&nbsp; Auto-rotates when idle
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ─── ALTITUDE RANGES ────────────────────────────────────────────────────────
+const RANGES = [];
+for (let lo = 500; lo < 9000; lo += 500) {
+  RANGES.push({ lo, hi: lo + 500 });
+}
+// Add 8500–9000+ cap
+RANGES.push({ lo: 8500, hi: 9000 });
+
+
+// Distinct colors per range band
+const RANGE_COLORS = [
+  '#22d3ee','#38bdf8','#60a5fa','#818cf8','#a78bfa',
+  '#c084fc','#e879f9','#f472b6','#fb7185','#f87171',
+  '#fbbf24','#34d399','#4ade80','#86efac','#bef264',
+  '#67e8f9','#a5f3fc','#e0f2fe'
+];
+
+// ─── BUILD SIDEBAR ────────────────────────────────────────────────────────────
+const rangeList = document.getElementById('range-list');
+RANGES.forEach((r, i) => {
+  const btn = document.createElement('button');
+  btn.className = 'range-btn';
+  btn.dataset.idx = i;
+  const color = RANGE_COLORS[i % RANGE_COLORS.length];
+  btn.innerHTML = `
+    <div class="spinner"></div>
+    <div class="range-dot" style="background:${color}"></div>
+    <span class="range-label">${r.lo.toLocaleString()} – ${r.hi.toLocaleString()} m</span>
+    <span class="range-count" id="cnt-${i}">—</span>
+  `;
+  btn.addEventListener('click', () => loadRange(i));
+  rangeList.appendChild(btn);
+});
+
+// ─── THREE.JS SETUP ──────────────────────────────────────────────────────────
+const canvas = document.getElementById('globe-canvas');
+const wrap   = canvas.parentElement;
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+camera.position.z = 2.8;
+
+// Lighting – directional "sun" from upper-right + soft ambient fill
+scene.add(new THREE.AmbientLight(0x223344, 0.8));
+const sun = new THREE.DirectionalLight(0xfff5e0, 1.6);
+sun.position.set(5, 3, 5);
+scene.add(sun);
+// Subtle fill light from the opposite side (earthshine effect)
+const fill = new THREE.DirectionalLight(0x2244aa, 0.15);
+fill.position.set(-5, -2, -3);
+scene.add(fill);
+
+// Earth textures via jsDelivr CDN (Three.js r128 assets)
+const CDN = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r128/examples/textures/planets/';
+const loader = new THREE.TextureLoader();
+const earthMap      = loader.load(CDN + 'earth_atmos_2048.jpg');
+const earthNormal   = loader.load(CDN + 'earth_normal_2048.jpg');
+const earthSpecular = loader.load(CDN + 'earth_specular_2048.jpg');
+
+// Globe sphere – real Earth appearance
+const globeGeo = new THREE.SphereGeometry(1, 64, 64);
+const globeMat = new THREE.MeshPhongMaterial({
+  map:         earthMap,
+  bumpMap:     earthNormal,
+  bumpScale:   0.05,
+  specularMap: earthSpecular,
+  specular:    new THREE.Color(0x44aacc),
+  shininess:   12
+});
+const globe = new THREE.Mesh(globeGeo, globeMat);
+scene.add(globe);
+
+// Atmospheric glow – thin blue shell seen from outside
+const atmosGeo = new THREE.SphereGeometry(1.028, 64, 64);
+const atmosMat = new THREE.MeshPhongMaterial({
+  color: 0x4fc3f7,
+  transparent: true,
+  opacity: 0.07,
+  side: THREE.BackSide,
+  depthWrite: false
+});
+scene.add(new THREE.Mesh(atmosGeo, atmosMat));
+
+// Stars background
+(function() {
+  const geo = new THREE.BufferGeometry();
+  const N   = 4000;
+  const pos = new Float32Array(N * 3);
+  const col = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const r = 150 + Math.random() * 150;
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    pos[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+    pos[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+    pos[i*3+2] = r * Math.cos(phi);
+    // slight colour variation: blue-white to warm white
+    const warm = Math.random();
+    col[i*3]   = 0.8 + warm * 0.2;
+    col[i*3+1] = 0.8 + warm * 0.1;
+    col[i*3+2] = 1.0;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+  const mat = new THREE.PointsMaterial({ size: 0.18, vertexColors: true, transparent: true, opacity: 0.75 });
+  scene.add(new THREE.Points(geo, mat));
+})();
+
+// Mountain markers group
+const markersGroup = new THREE.Group();
+scene.add(markersGroup);
+
+// ─── MOUSE / ORBIT ────────────────────────────────────────────────────────────
+let isDragging = false, prevMouse = { x: 0, y: 0 };
+// Start centred on Europe/Africa (lon ≈ 15° → offset in radians)
+let rotX = 0.3, rotY = -0.26;
+let zoom = 2.8;
+let autoRotate = true;   // gentle spin when idle
+
+canvas.addEventListener('mousedown', e => { isDragging = true; autoRotate = false; prevMouse = { x: e.clientX, y: e.clientY }; });
+window.addEventListener('mouseup', () => { isDragging = false; });
+window.addEventListener('mousemove', e => {
+  if (!isDragging) { checkHover(e); return; }
+  const dx = e.clientX - prevMouse.x;
+  const dy = e.clientY - prevMouse.y;
+  rotY += dx * 0.005;
+  rotX += dy * 0.005;
+  rotX = Math.max(-Math.PI/2, Math.min(Math.PI/2, rotX));
+  prevMouse = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('wheel', e => {
+  zoom += e.deltaY * 0.002;
+  zoom = Math.max(1.4, Math.min(5, zoom));
+  e.preventDefault();
+}, { passive: false });
+
+// ─── TOOLTIP / RAYCASTING ────────────────────────────────────────────────────
+const raycaster = new THREE.Raycaster();
+const mouse2d   = new THREE.Vector2();
+const tooltip   = document.getElementById('tooltip');
+let allMarkerMeshes = [];
+
+function checkHover(e) {
+  const rect = canvas.getBoundingClientRect();
+  mouse2d.x = ((e.clientX - rect.left) / rect.width)  *  2 - 1;
+  mouse2d.y = ((e.clientY - rect.top)  / rect.height) * -2 + 1;
+  raycaster.setFromCamera(mouse2d, camera);
+  const hits = raycaster.intersectObjects(allMarkerMeshes);
+  if (hits.length) {
+    const m = hits[0].object;
+    document.getElementById('tt-name').textContent    = m.userData.name;
+    document.getElementById('tt-height').textContent  = m.userData.height.toLocaleString() + ' m';
+    document.getElementById('tt-country').textContent = m.userData.country || '';
+    tooltip.style.left = (e.clientX - rect.left + 12) + 'px';
+    tooltip.style.top  = (e.clientY - rect.top  - 10) + 'px';
+    tooltip.classList.add('visible');
+  } else {
+    tooltip.classList.remove('visible');
+  }
+}
+
+// ─── RESIZE ──────────────────────────────────────────────────────────────────
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(wrap);
+resize();
+
+// ─── ANIMATE LOOP ────────────────────────────────────────────────────────────
+(function animate() {
+  requestAnimationFrame(animate);
+  if (autoRotate) rotY += 0.0008;
+  globe.rotation.x = rotX;
+  globe.rotation.y = rotY;
+  markersGroup.rotation.x = rotX;
+  markersGroup.rotation.y = rotY;
+  camera.position.z = zoom;
+  renderer.render(scene, camera);
+})();
+
+// ─── LAT/LON → 3D ────────────────────────────────────────────────────────────
+function latLonToVec3(lat, lon, r) {
+  const phi   = (90 - lat) * Math.PI / 180;
+  const theta = (lon + 180) * Math.PI / 180;
+  return new THREE.Vector3(
+    -r * Math.sin(phi) * Math.cos(theta),
+     r * Math.cos(phi),
+     r * Math.sin(phi) * Math.sin(theta)
+  );
+}
+
+// ─── LOAD RANGE ──────────────────────────────────────────────────────────────
+let activeIdx = -1;
+const cache   = {};
+
+async function loadRange(idx) {
+  if (activeIdx === idx) return;
+
+  // Update UI active state
+  document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+  const btn = document.querySelector(`.range-btn[data-idx="${idx}"]`);
+  btn.classList.add('active', 'loading');
+
+  setStatus('loading', 'Querying Wikidata…');
+  document.getElementById('empty-state').style.display = 'none';
+  document.getElementById('error-msg').style.display   = 'none';
+
+  try {
+    let mountains;
+    if (cache[idx]) {
+      mountains = cache[idx];
+    } else {
+      mountains = await fetchMountains(RANGES[idx].lo, RANGES[idx].hi);
+      cache[idx] = mountains;
+    }
+
+    document.getElementById(`cnt-${idx}`).textContent = mountains.length;
+    renderMarkers(mountains, idx);
+    activeIdx = idx;
+    document.getElementById('total-count').textContent = `${mountains.length} mountains loaded`;
+    document.getElementById('legend').style.display = 'block';
+    setStatus('ok', `${mountains.length} results`);
+  } catch(err) {
+    console.error(err);
+    document.getElementById('error-msg').textContent = '⚠ ' + err.message;
+    document.getElementById('error-msg').style.display = 'block';
+    setStatus('error', 'Query failed');
+  } finally {
+    btn.classList.remove('loading');
+  }
+}
+
+// ─── RENDER MARKERS ──────────────────────────────────────────────────────────
+function renderMarkers(mountains, idx) {
+  // Clear previous
+  while (markersGroup.children.length) markersGroup.remove(markersGroup.children[0]);
+  allMarkerMeshes = [];
+
+  if (!mountains.length) return;
+
+  const color = RANGE_COLORS[idx % RANGE_COLORS.length];
+  const range = RANGES[idx];
+  const maxH  = Math.max(...mountains.map(m => m.height));
+  const minH  = Math.min(...mountains.map(m => m.height));
+
+  mountains.forEach(m => {
+    const t = maxH === minH ? 0.5 : (m.height - minH) / (maxH - minH);
+
+    // Pin height proportional to real altitude (0.04 … 0.22 units on globe r=1)
+    const pinH = 0.04 + t * 0.18;
+
+    const base = latLonToVec3(m.lat, m.lon, 1.0);
+    const tip  = latLonToVec3(m.lat, m.lon, 1.0 + pinH);
+
+    // Cylinder (pin body)
+    const cyl = new THREE.CylinderGeometry(0.003, 0.007, pinH, 6);
+    const mid = new THREE.Vector3().addVectors(base, tip).multiplyScalar(0.5);
+    const mat = new THREE.MeshPhongMaterial({
+      color: new THREE.Color(color),
+      emissive: new THREE.Color(color).multiplyScalar(0.25),
+      transparent: true, opacity: 0.88
+    });
+    const mesh = new THREE.Mesh(cyl, mat);
+    mesh.position.copy(mid);
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), base.clone().normalize());
+    mesh.userData = { name: m.name, height: m.height, country: m.country };
+    markersGroup.add(mesh);
+    allMarkerMeshes.push(mesh);
+
+    // Glowing tip sphere
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.008 + t * 0.008, 8, 8),
+      new THREE.MeshPhongMaterial({
+        color: new THREE.Color(t > 0.7 ? '#06b6d4' : color),
+        emissive: new THREE.Color(t > 0.7 ? '#06b6d4' : color).multiplyScalar(0.5)
+      })
+    );
+    sphere.position.copy(tip);
+    sphere.userData = { name: m.name, height: m.height, country: m.country };
+    markersGroup.add(sphere);
+    allMarkerMeshes.push(sphere);
+  });
+}
+
+// ─── STATUS ──────────────────────────────────────────────────────────────────
+function setStatus(type, msg) {
+  const dot  = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  dot.className = 'status-dot' + (type === 'loading' ? ' loading' : type === 'error' ? ' error' : '');
+  text.textContent = msg;
+}
+
+// ─── FETCH via local proxy ─────────────────────────────────────────────────
+async function fetchMountains(lo, hi) {
+  const url = `/sparql?lo=${lo}&hi=${hi}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Server error ${res.status}`);
+  const data = await res.json();
+  return data;
+}
+</script>
+</body>
+</html>
+"""
+
+# ─── SPARQL QUERY ─────────────────────────────────────────────────────────────
+SPARQL_ENDPOINT = "https://query.wikidata.org/sparql"
+
+def build_sparql(lo: int, hi: int) -> str:
+    return f"""
+SELECT ?mountain ?mountainLabel ?height ?lat ?lon ?country ?countryLabel WHERE {{
+  {{
+    SELECT ?mountain ?height ?lat ?lon ?country WHERE {{
+      {{ ?mountain wdt:P31 wd:Q8502 }}
+      UNION
+      {{ ?mountain wdt:P31/wdt:P279 wd:Q8502 }}
+      ?mountain p:P2044/psn:P2044/wikibase:quantityAmount ?height .
+      FILTER(?height >= {lo} && ?height < {hi})
+      ?mountain wdt:P625 ?coord .
+      BIND(geof:latitude(?coord)  AS ?lat)
+      BIND(geof:longitude(?coord) AS ?lon)
+      FILTER(?lat >= -90 && ?lat <= 90 && ?lon >= -180 && ?lon <= 180)
+      OPTIONAL {{ ?mountain wdt:P17 ?country . }}
+    }}
+    ORDER BY DESC(?height)
+    LIMIT 300
+  }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,es" . }}
+}}
+ORDER BY DESC(?height)
+"""
+
+# ─── DISK CACHE ──────────────────────────────────────────────────────────────
+CACHE_TTL = 24 * 3600  # 24 hours
+
+def _cache_path(lo: int, hi: int) -> str:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    return os.path.join(CACHE_DIR, f"{lo}_{hi}.json")
+
+def _cache_load(lo: int, hi: int):
+    path = _cache_path(lo, hi)
+    if not os.path.exists(path):
+        return None
+    if time.time() - os.path.getmtime(path) > CACHE_TTL:
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+def _cache_save(lo: int, hi: int, data: list):
+    with open(_cache_path(lo, hi), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
+def query_wikidata(lo: int, hi: int):
+    cached = _cache_load(lo, hi)
+    if cached is not None:
+        print(f"  ✓ Cache hit: {lo}–{hi} m ({len(cached)} mountains)")
+        return cached
+
+    query = build_sparql(lo, hi)
+    params = urllib.parse.urlencode({
+        "query": query,
+        "format": "json"
+    })
+    url = f"{SPARQL_ENDPOINT}?{params}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/sparql-results+json",
+            "User-Agent": "MountainGlobeExplorer/1.0 (educational project)"
+        }
+    )
+    with urllib.request.urlopen(req, timeout=45) as resp:
+        raw = json.loads(resp.read().decode())
+
+    # First pass: collect all rows
+    rows = []
+    for b in raw.get("results", {}).get("bindings", []):
+        try:
+            name    = b["mountainLabel"]["value"]
+            height  = float(b["height"]["value"])
+            lat     = float(b["lat"]["value"])
+            lon     = float(b["lon"]["value"])
+            country = b.get("countryLabel", {}).get("value", "")
+            if name.startswith("Q") and name[1:].isdigit():
+                continue
+            rows.append({"name": name, "height": height, "lat": lat, "lon": lon, "country": country})
+        except (KeyError, ValueError):
+            continue
+
+    # Deduplicate by geographic position (same coords = same mountain).
+    # Multiple statements per mountain (different measurements or countries)
+    # collapse into one entry: keep the highest height, merge country names.
+    seen = {}
+    for r in rows:
+        key = (round(r["lat"], 3), round(r["lon"], 3))
+        if key not in seen:
+            seen[key] = r.copy()
+        else:
+            entry = seen[key]
+            if r["height"] > entry["height"]:
+                entry["height"] = r["height"]
+                entry["name"]   = r["name"]
+            if r["country"] and r["country"] not in entry["country"]:
+                entry["country"] = (entry["country"] + ", " + r["country"]).strip(", ")
+
+    results = [
+        {**e, "height": round(e["height"])}
+        for e in sorted(seen.values(), key=lambda x: -x["height"])
+    ]
+    _cache_save(lo, hi, results)
+    return results
+
+
+# ─── HTTP SERVER ──────────────────────────────────────────────────────────────
+class Handler(http.server.BaseHTTPRequestHandler):
+
+    def log_message(self, format, *args):
+        # Clean log output
+        print(f"  {self.command} {self.path} → {args[1] if len(args)>1 else ''}")
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+
+        # ── Serve the main HTML page
+        if parsed.path == "/" or parsed.path == "/index.html":
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ── SPARQL proxy endpoint
+        elif parsed.path == "/sparql":
+            params = urllib.parse.parse_qs(parsed.query)
+            try:
+                lo = int(params["lo"][0])
+                hi = int(params["hi"][0])
+                if lo < 0 or hi > 10000 or lo >= hi:
+                    raise ValueError("Invalid range")
+            except (KeyError, ValueError, IndexError) as e:
+                self._json_error(400, f"Bad params: {e}")
+                return
+
+            source = "cache" if _cache_load(lo, hi) is not None else "Wikidata"
+            print(f"  /sparql {lo}–{hi} m → {source}")
+            try:
+                data = query_wikidata(lo, hi)
+                print(f"  → {len(data)} mountains")
+                body = json.dumps(data).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                print(f"  ✗ SPARQL error: {e}")
+                self._json_error(502, str(e))
+
+        else:
+            self._json_error(404, "Not found")
+
+    def _json_error(self, code, msg):
+        body = json.dumps({"error": msg}).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+# ─── BACKGROUND PREFETCH ─────────────────────────────────────────────────────
+# Priority ranges to warm up: the high-altitude bands most likely to be clicked.
+PREFETCH_RANGES = [
+    (7000, 8000), (8000, 9000), (6000, 7000), (5000, 6000),
+    (4000, 5000), (3000, 4000),
+]
+
+def _prefetch():
+    print("  Background prefetch started…")
+    for lo, hi in PREFETCH_RANGES:
+        if _cache_load(lo, hi) is not None:
+            print(f"  ✓ Already cached: {lo}–{hi} m")
+            continue
+        try:
+            print(f"  Prefetching {lo}–{hi} m…")
+            query_wikidata(lo, hi)
+            time.sleep(2)  # respect Wikidata rate limits between requests
+        except Exception as e:
+            print(f"  ✗ Prefetch failed {lo}–{hi}: {e}")
+    print("  Background prefetch complete.")
+
+
+# ─── MAIN ────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    cached_count = sum(
+        1 for lo, hi in PREFETCH_RANGES if _cache_load(lo, hi) is not None
+    )
+    print("=" * 55)
+    print("  ⛰  Mountain Globe Explorer")
+    print("=" * 55)
+    print(f"  Server running at  http://localhost:{PORT}")
+    print(f"  Data source        Wikidata SPARQL endpoint")
+    print(f"  Cache directory    {CACHE_DIR}")
+    print(f"  Cached ranges      {cached_count}/{len(PREFETCH_RANGES)} priority ranges")
+    print(f"  Press Ctrl+C to stop")
+    print("=" * 55)
+
+    threading.Thread(target=_prefetch, daemon=True).start()
+
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        httpd.allow_reuse_address = True
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\n  Server stopped.")
